@@ -1,0 +1,96 @@
+#!/usr/bin/env perl6
+use v6.d.PREVIEW;
+
+use DBIish;
+use File::Temp;
+
+sub routine_and_children($dbh, $id) {
+    sub concise-name($name) {
+        return "<anon>" if $name eq "";
+        $name
+    }
+
+    my $query = $dbh.prepare(q:to/STMT/);
+        select
+            routines.name as name,
+            routines.line as line,
+            routines.file as file,
+
+            calls.id as id,
+            calls.parent_id      as parent_id,
+            calls.entries        as entries,
+            calls.exclusive_time as exclusive,
+            calls.inclusive_time as inclusive
+
+            from calls inner join routines on calls.routine_id = routines.id
+
+            where calls.parent_id = ? or calls.id = ?
+
+            order by calls.id asc
+            ;
+        STMT
+
+    my $childcount = $dbh.prepare(q:to/STMT/);
+        select count(*) from calls where parent_id = ?
+        STMT
+
+    $query.execute($id, $id);
+    my @results;
+    for $query.allrows(:array-of-hash) -> $/ {
+        @results.push: $/;
+        $<name> = concise-name($<name>);
+        $<depth> = +($<id> != $id);
+        $childcount.execute($<id>);
+        $<childcount> = $childcount.row.first;
+    }
+
+    $query.finish;
+    $childcount.finish;
+
+    @results;
+}
+
+multi sub MAIN($databasefile where all(*.ends-with('sqlite3'), *.IO.f, *.IO.e), Str :$output) {
+    my $dbh = DBIish.connect("SQLite", :database($databasefile));
+    my $tmpfile;
+    if ($output) {
+        $tmpfile = $output;
+    } else {
+        ($tmpfile, $_) = tempfile(:prefix('callgrind.out.'), :!unlink);
+    }
+    my $fh = open($tmpfile, :w);
+
+    $fh.say: q:to/HEADER/;
+    version: 1
+    creator: p6profiler-tocallgrind
+    events: Miliseconds
+    HEADER
+
+    my @queue = 0;
+    while @queue {
+        my $target = @queue.pop;
+        my ($/, @children) = $dbh.&routine_and_children($target);
+        $fh.print: qq:to/ENTRY/;
+        fl=$<file>
+        fn=($<id>) $<name>
+        $<line> $<exclusive>
+        ENTRY
+        for @children -> $c {
+            @queue.push($c<id>);
+            $fh.print: qq:to/ENTRY/;
+            cfi=$c<file>
+            cfn=($c<id>) $c<name>
+            calls=$c<entries> $c<line>
+            $<line> $<inclusive>
+            ENTRY
+        }
+        $fh.say: "";
+    }
+    $fh.close;
+    if ($output) {
+        say "Profile data saved as $tmpfile";
+    } else {
+        run "qcachegrind", $tmpfile;
+        unlink $tmpfile;
+    }
+}
