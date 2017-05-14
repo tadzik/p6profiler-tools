@@ -1,0 +1,11 @@
+use File::Temp;
+
+sub MAIN($source, :$outfile is copy) {
+    my ($sqlfile, $dontcare) = tempfile(suffix => '.sql');
+    unless ($outfile) {
+        $outfile = $source.subst(/\.pl6?$/, '.sqlite3');
+    }
+    say "perl6 --profile --profile-filename $sqlfile $source";
+    shell "perl6 --profile --profile-filename $sqlfile $source";
+    shell "sqlite3 $outfile < $sqlfile";
+}
